@@ -67,6 +67,7 @@ int trigger6_set_resolution(struct trigger6_device *trigger6,
 			    const struct trigger6_mode *mode);
 
 int trigger6_read_modes(struct trigger6_device *trigger6, int output_index, int byte_offset, void* data, int length);
+int trigger6_read_connector_status(struct trigger6_device *trigger6, int output_index);
 void trigger6_free_urb(struct trigger6_device *trigger6);
 int trigger6_init_urb(struct trigger6_device *trigger6, size_t total_size);
 int trigger6_power_on(struct trigger6_device *trigger6);

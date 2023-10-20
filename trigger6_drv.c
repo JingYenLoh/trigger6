@@ -7,6 +7,7 @@
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_fbdev_generic.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
@@ -74,19 +75,6 @@ static const struct drm_mode_config_funcs trigger6_mode_config_funcs = {
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
 };
-
-int trigger6_read_modes(struct trigger6_device *trigger6, int output_index,
-			int byte_offset, void *data, int length)
-{
-	int ret;
-	struct usb_interface *intf = trigger6->intf;
-	struct usb_device *usb_dev = interface_to_usbdev(intf);
-
-	ret = usb_control_msg(usb_dev, usb_rcvctrlpipe(usb_dev, 0), 0x89,
-			      USB_DIR_IN | USB_TYPE_VENDOR, output_index,
-			      byte_offset, data, length, USB_CTRL_GET_TIMEOUT);
-	return ret;
-}
 
 static const struct trigger6_mode *
 trigger6_get_mode(const struct drm_display_mode *mode)

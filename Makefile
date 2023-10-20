@@ -1,7 +1,6 @@
 trigger6-y := \
 	trigger6_registers.o \
 	trigger6_connector.o \
-	trigger6_transfer.o \
 	trigger6_drv.o
 
 obj-m := trigger6.o
