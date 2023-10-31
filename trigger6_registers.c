@@ -39,33 +39,42 @@ int trigger6_read_connector_status(struct trigger6_device *trigger6,
 	return ret;
 }
 
-int trigger6_read_byte(struct trigger6_device *trigger6, u16 address)
+int trigger6_enable_output(struct trigger6_device *trigger6)
 {
-	// TODO
-	return 0;
+	int ret;
+	struct usb_interface *intf = trigger6->intf;
+	struct usb_device *usb_dev = interface_to_usbdev(intf);
+
+	ret = usb_control_msg(usb_dev, usb_sndctrlpipe(usb_dev, 0), 0x3,
+			      USB_TYPE_VENDOR, 0, 0x0001, NULL, 0,
+			      USB_CTRL_SET_TIMEOUT);
+
+	return ret;
 }
 
-static inline int trigger6_write_6_bytes(struct trigger6_device *trigger6,
-					 u16 address, void *data)
+int trigger6_disable_output(struct trigger6_device *trigger6)
 {
-	// TODO
-	return 0;
+	int ret;
+	struct usb_interface *intf = trigger6->intf;
+	struct usb_device *usb_dev = interface_to_usbdev(intf);
+
+	ret = usb_control_msg(usb_dev, usb_sndctrlpipe(usb_dev, 0), 0x3,
+			      USB_TYPE_VENDOR, 0, 0x0000, NULL, 0,
+			      USB_CTRL_SET_TIMEOUT);
+
+	return ret;
 }
 
-int trigger6_power_on(struct trigger6_device *trigger6)
-{
-	// TODO
-	return 0;
-}
-
-int trigger6_power_off(struct trigger6_device *trigger6)
-{
-	// TODO
-	return 0;
-}
 int trigger6_set_resolution(struct trigger6_device *trigger6,
-			    const struct trigger6_mode *mode)
+			    struct trigger6_mode *mode)
 {
-	// TODO
-	return 0;
+	int ret;
+	struct usb_interface *intf = trigger6->intf;
+	struct usb_device *usb_dev = interface_to_usbdev(intf);
+
+	ret = usb_control_msg(usb_dev, usb_sndctrlpipe(usb_dev, 0), 0x12,
+			      USB_TYPE_VENDOR, 0, 0, mode, 32,
+			      USB_CTRL_SET_TIMEOUT);
+
+	return ret;
 }

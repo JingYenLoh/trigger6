@@ -76,9 +76,24 @@ static const struct drm_mode_config_funcs trigger6_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-static const struct trigger6_mode *
-trigger6_get_mode(const struct drm_display_mode *mode)
+static struct trigger6_mode *
+trigger6_get_mode(struct drm_simple_display_pipe *pipe,
+		  struct drm_display_mode *mode)
 {
+	struct trigger6_device *device = to_trigger6(pipe->crtc.dev);
+
+	int i;
+	u16 width = mode->hdisplay;
+	u16 height = mode->vdisplay;
+	u16 hz = drm_mode_vrefresh(mode);
+	for (i = 0; i < ARRAY_SIZE(device->modes); i++) {
+		if (device->modes[i].line_active_pixels == width &&
+		    device->modes[i].frame_active_lines == height &&
+		    device->modes[i].refresh_rate_hz == hz) {
+			return &device->modes[i];
+		}
+	}
+
 	return ERR_PTR(-EINVAL);
 }
 
@@ -86,20 +101,31 @@ static void trigger6_pipe_enable(struct drm_simple_display_pipe *pipe,
 				 struct drm_crtc_state *crtc_state,
 				 struct drm_plane_state *plane_state)
 {
-	// TODO
+	struct trigger6_device *device = to_trigger6(pipe->crtc.dev);
+
+	trigger6_enable_output(device);
+
+	if (crtc_state->mode_changed) {
+		trigger6_set_resolution(
+			device,
+			trigger6_get_mode(pipe, &crtc_state->adjusted_mode));
+	}
 }
 
 static void trigger6_pipe_disable(struct drm_simple_display_pipe *pipe)
 {
-	// TODO
+	struct trigger6_device *device = to_trigger6(pipe->crtc.dev);
+
+	trigger6_disable_output(device);
 }
 
 enum drm_mode_status
 trigger6_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode)
 {
-	// TODO
-	return MODE_OK;
+	const struct trigger6_mode *trigger6_mode =
+		trigger6_get_mode(pipe, mode);
+	return IS_ERR(trigger6_mode) ? MODE_BAD : MODE_OK;
 }
 
 int trigger6_pipe_check(struct drm_simple_display_pipe *pipe,
@@ -168,7 +194,8 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 
 	for (int i = 0; i < ARRAY_SIZE(trigger6->modes); i++) {
 		drm_warn(dev, "mode %d: %dx%d@%d\n", i,
-			 trigger6->modes[i].line_active_pixels, trigger6->modes[i].frame_active_lines,
+			 trigger6->modes[i].line_active_pixels,
+			 trigger6->modes[i].frame_active_lines,
 			 trigger6->modes[i].refresh_rate_hz);
 	}
 
