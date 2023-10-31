@@ -1,5 +1,5 @@
 trigger6-y := \
-	trigger6_registers.o \
+	trigger6_commands.o \
 	trigger6_connector.o \
 	trigger6_drv.o
 
