@@ -15,17 +15,11 @@ static int trigger6_read_edid(void *data, u8 *buf, unsigned int block, size_t le
 	struct usb_device *usb_dev = interface_to_usbdev(intf);
 	int offset = block * EDID_LENGTH;
 
-	if (block > 0)
-	{
-		memset(buf, 0, length);
-		return 0;
-	}
-
 	ret = usb_control_msg(usb_dev, usb_rcvctrlpipe(usb_dev, 0), 0x80,
 			      USB_DIR_IN | USB_TYPE_VENDOR, offset,
 			      0, buf, length, USB_CTRL_GET_TIMEOUT);
 
-	
+	// TODO remove
 	drm_warn(trigger6->connector.dev, "read edid: %d %zu\n", buf[4], length);
 
 	return 0;
