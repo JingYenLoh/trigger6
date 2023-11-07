@@ -11,12 +11,16 @@
 #include <drm/drm_simple_kms_helper.h>
 
 #define DRIVER_NAME "trigger6"
-#define DRIVER_DESC "MacroSilicon USB to VGA/HDMI"
-#define DRIVER_DATE "20220101"
+#define DRIVER_DESC "Magic Control Technology Trigger 6"
+#define DRIVER_DATE "20231031"
 
 #define DRIVER_MAJOR 0
 #define DRIVER_MINOR 0
 #define DRIVER_PATCHLEVEL 1
+
+#define TRIGGER6_ENDPOINT_BULK_IN 0x1
+#define TRIGGER6_ENDPOINT_BULK_OUT 0x2
+#define TRIGGER6_ENDPOINT_INTERRUPT_IN 0x3
 
 struct trigger6_mode {
 	u32 pixel_clock_khz;
@@ -83,8 +87,6 @@ struct trigger6_device {
 	spinlock_t urb_available_list_lock;
 	struct semaphore urb_available_list_sem;
 };
-
-#define TRIGGER6_MAX_TRANSFER_LENGTH 65536
 
 #define to_trigger6(x) container_of(x, struct trigger6_device, drm)
 
