@@ -37,6 +37,33 @@ struct trigger6_mode {
 	u16 unk11;
 } __attribute__((packed));
 
+struct trigger6_session {
+	__le32 session_number;
+	__le32 payload_length;
+	__le32 dest_addr;
+	__le32 packet_length;
+	__le32 bytes_written;
+	__le32 output_index;
+	__le32 unk7;
+	__le32 unk8;
+} __attribute__((packed));
+
+struct trigger6_video_header {
+	__le32 type; // 0x3 = full, 0x4 = partial?, 0x7 = partial??
+	__le32 data_length;
+	__le32 sequence_counter;
+	__le32 unk4;	// values seen: 6, 9
+	__le16 width;	// or height
+	__le16 height;	// or width
+	__le32 start_address;
+	__le32 end_address;
+	__le32 unk9;
+	__le32 unk10;
+	__le32 unk11;
+	__le32 unk12;
+	__le32 unk13;
+} __attribute__((packed));
+
 struct trigger6_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
