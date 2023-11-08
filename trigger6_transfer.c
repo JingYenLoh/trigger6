@@ -106,58 +106,6 @@ struct urb *trigger6_get_urb(struct trigger6_device *trigger6)
 	return urb_entry->urb;
 }
 
-static inline int trigger6_rgb_to_y(int r, int g, int b)
-{
-	const int luma = (16 << 16) + 16763 * r + 32904 * g + 6391 * b;
-	return luma >> 16;
-}
-static inline int trigger6_rgb_to_u(int r, int g, int b)
-{
-	const int u = (128 << 16) - 9676 * r - 18996 * g + 28672 * b;
-	return u >> 16;
-}
-static inline int trigger6_rgb_to_v(int r, int g, int b)
-{
-	const int v = (128 << 16) + 28672 * r - 24009 * g - 4663 * b;
-	return v >> 16;
-}
-
-static int trigger6_xrgb_to_yuv422_line(u8 *transfer_buffer, u32 *xrgb_buffer,
-				      size_t len)
-{
-	int i, offset = 0;
-	unsigned int pixel1, pixel2;
-	int r1, g1, b1, r2, g2, b2;
-	int v, y1, u, y2;
-	for (i = 0; i < len; i += 2) {
-		pixel1 = xrgb_buffer[i];
-		pixel2 = xrgb_buffer[i + 1];
-
-		r1 = (pixel1 >> 16) & 0xFF;
-		g1 = (pixel1 >> 8) & 0xFF;
-		b1 = pixel1 & 0xFF;
-		r2 = (pixel2 >> 16) & 0xFF;
-		g2 = (pixel2 >> 8) & 0xFF;
-		b2 = pixel2 & 0xFF;
-
-		y1 = trigger6_rgb_to_y(r1, g1, b1);
-		y2 = trigger6_rgb_to_y(r2, g2, b2);
-
-		v = (trigger6_rgb_to_v(r1, g1, b1) +
-		     trigger6_rgb_to_v(r2, g2, b2)) /
-		    2;
-		u = (trigger6_rgb_to_u(r1, g1, b1) +
-		     trigger6_rgb_to_u(r2, g2, b2)) /
-		    2;
-
-		transfer_buffer[offset++] = u;
-		transfer_buffer[offset++] = y1;
-		transfer_buffer[offset++] = v;
-		transfer_buffer[offset++] = y2;
-	}
-	return offset;
-}
-
 static const unsigned char trigger6_end_of_buffer[8] = { 0xff, 0xc0, 0x00, 0x00,
 						       0x00, 0x00, 0x00, 0x00 };
 

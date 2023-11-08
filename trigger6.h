@@ -62,7 +62,7 @@ struct trigger6_video_header {
 	__le32 start_address;
 	__le32 end_address;
 	__le32 unk9;
-	__le32 unk10;
+	__le32 image_format; // 0xD for JPEG, 0x6 for NV12, 0x9 for BGR24
 	__le32 unk11;
 	__le32 unk12;
 	__le32 unk13;

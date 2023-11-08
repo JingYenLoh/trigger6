@@ -78,7 +78,7 @@ static const struct drm_mode_config_funcs trigger6_mode_config_funcs = {
 
 static struct trigger6_mode *
 trigger6_get_mode(struct drm_simple_display_pipe *pipe,
-		  struct drm_display_mode *mode)
+		  const struct drm_display_mode *mode)
 {
 	struct trigger6_device *device = to_trigger6(pipe->crtc.dev);
 
@@ -101,13 +101,13 @@ static void trigger6_pipe_enable(struct drm_simple_display_pipe *pipe,
 				 struct drm_crtc_state *crtc_state,
 				 struct drm_plane_state *plane_state)
 {
-	struct trigger6_device *device = to_trigger6(pipe->crtc.dev);
+	struct trigger6_device *trigger6 = to_trigger6(pipe->crtc.dev);
 
-	trigger6_enable_output(device);
+	trigger6_enable_output(trigger6);
 
 	if (crtc_state->mode_changed) {
 		trigger6_set_resolution(
-			device,
+			trigger6,
 			trigger6_get_mode(pipe, &crtc_state->adjusted_mode));
 	}
 }
@@ -128,23 +128,83 @@ trigger6_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 	return IS_ERR(trigger6_mode) ? MODE_BAD : MODE_OK;
 }
 
-int trigger6_pipe_check(struct drm_simple_display_pipe *pipe,
-			struct drm_plane_state *new_plane_state,
-			struct drm_crtc_state *new_crtc_state)
-{
-	return 0;
-}
-
 static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 				 struct drm_plane_state *old_state)
 {
-	// TODO
+	int ret;
+	struct trigger6_device *trigger6 = to_trigger6(pipe->crtc.dev);
+	struct usb_interface *intf = trigger6->intf;
+	struct usb_device *usb_dev = interface_to_usbdev(intf);
+	struct drm_plane_state *state = pipe->plane.state;
+	struct drm_shadow_plane_state *shadow_plane_state =
+		to_drm_shadow_plane_state(state);
+	struct drm_rect current_rect;
+
+	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
+		// TODO negotiate session
+		void *packet =
+			kzalloc(0x100 + sizeof(struct trigger6_video_header),
+				GFP_KERNEL);
+		struct trigger6_session session = {
+			.session_number = 0,
+			.payload_length = cpu_to_le32(
+				0x100 + sizeof(struct trigger6_video_header)),
+			.dest_addr = cpu_to_le32(0x30),
+			.packet_length = cpu_to_le32(
+				0x100 + sizeof(struct trigger6_video_header)),
+			.bytes_written = cpu_to_le32(0x0),
+			.output_index = cpu_to_le32(0x0)
+		};
+		memcpy(packet, &session, sizeof(session));
+		ret = usb_bulk_msg(
+			usb_dev,
+			usb_sndbulkpipe(usb_dev, TRIGGER6_ENDPOINT_BULK_OUT),
+			packet, sizeof(struct trigger6_session), NULL, 5000);
+
+		if (ret < 0) {
+			drm_warn(&trigger6->drm,
+				 "Session negotiation failed: %d", ret);
+		}
+
+		// Fuzz
+		struct trigger6_video_header video_header = { 0 };
+		video_header.type = cpu_to_le32(0x3);
+		video_header.data_length = cpu_to_le32(0x100);
+		video_header.sequence_counter = cpu_to_le32(1);
+		video_header.unk4 = cpu_to_le32(0x6);
+		video_header.width = cpu_to_le16(0x550);
+		video_header.height = cpu_to_le16(0x550);
+		video_header.start_address = cpu_to_le32(0x01000000);
+		video_header.end_address = cpu_to_le32(0x01000000 + 0x100);
+		video_header.image_format = cpu_to_le32(0x9);
+
+		u8 random_bytes[256] = { 0 };
+		for (int i = 0; i < 0x100; i++) {
+			random_bytes[i] = i;
+		}
+
+		// pack video header with random bytes
+		memcpy(packet, &video_header,
+		       sizeof(struct trigger6_video_header));
+		memcpy(packet + sizeof(struct trigger6_video_header),
+		       random_bytes, sizeof(random_bytes));
+
+		ret = usb_bulk_msg(usb_dev,
+				   usb_sndbulkpipe(usb_dev,
+						   TRIGGER6_ENDPOINT_BULK_OUT),
+				   packet, sizeof(packet), NULL, 5000);
+
+		if (ret < 0) {
+			drm_warn(&trigger6->drm, "Fuzz packet failed");
+		}
+
+		kfree(packet);
+	}
 }
 
 static const struct drm_simple_display_pipe_funcs trigger6_pipe_funcs = {
 	.enable = trigger6_pipe_enable,
 	.disable = trigger6_pipe_disable,
-	.check = trigger6_pipe_check,
 	.mode_valid = trigger6_pipe_mode_valid,
 	.update = trigger6_pipe_update,
 	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
@@ -239,7 +299,6 @@ static void trigger6_usb_disconnect(struct usb_interface *interface)
 	drm_kms_helper_poll_fini(dev);
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
-	// trigger6_free_urb(trigger6);
 	put_device(trigger6->dmadev);
 	trigger6->dmadev = NULL;
 }
