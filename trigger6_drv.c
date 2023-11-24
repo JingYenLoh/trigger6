@@ -7,6 +7,7 @@
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_format_helper.h>
 #include <drm/drm_fbdev_generic.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem_atomic_helper.h>
@@ -19,6 +20,8 @@
 #include <drm/drm_simple_kms_helper.h>
 
 #include "trigger6.h"
+
+#include "img.h"
 
 static int trigger6_usb_suspend(struct usb_interface *interface,
 				pm_message_t message)
@@ -138,67 +141,96 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct drm_plane_state *state = pipe->plane.state;
 	struct drm_shadow_plane_state *shadow_plane_state =
 		to_drm_shadow_plane_state(state);
+	int width, height;
+	size_t buf_size;
 	struct drm_rect current_rect;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
-		// TODO negotiate session
-		void *packet =
-			kzalloc(0x100 + sizeof(struct trigger6_video_header),
-				GFP_KERNEL);
-		struct trigger6_session session = {
-			.session_number = 0,
-			.payload_length = cpu_to_le32(
-				0x100 + sizeof(struct trigger6_video_header)),
-			.dest_addr = cpu_to_le32(0x30),
-			.packet_length = cpu_to_le32(
-				0x100 + sizeof(struct trigger6_video_header)),
-			.bytes_written = cpu_to_le32(0x0),
-			.output_index = cpu_to_le32(0x0)
-		};
-		memcpy(packet, &session, sizeof(session));
-		ret = usb_bulk_msg(
-			usb_dev,
-			usb_sndbulkpipe(usb_dev, TRIGGER6_ENDPOINT_BULK_OUT),
-			packet, sizeof(struct trigger6_session), NULL, 5000);
+		// hack to force full screen updates for now
+		current_rect.x1 = 0;
+		current_rect.y1 = 0;
+		current_rect.x2 = state->fb->width;
+		current_rect.y2 = state->fb->height;
 
-		if (ret < 0) {
-			drm_warn(&trigger6->drm,
-				 "Session negotiation failed: %d", ret);
-		}
+		width = drm_rect_width(&current_rect);
+		height = drm_rect_height(&current_rect);
 
-		// Fuzz
+		buf_size = sizeof(struct trigger6_video_header) +
+				  width * height * 3;
+		void *buf = vmalloc(buf_size);
 		struct trigger6_video_header video_header = { 0 };
 		video_header.type = cpu_to_le32(0x3);
-		video_header.data_length = cpu_to_le32(0x100);
+		video_header.data_length = cpu_to_le32(buf_size);
 		video_header.sequence_counter = cpu_to_le32(1);
-		video_header.unk4 = cpu_to_le32(0x6);
-		video_header.width = cpu_to_le16(0x550);
-		video_header.height = cpu_to_le16(0x550);
-		video_header.start_address = cpu_to_le32(0x01000000);
-		video_header.end_address = cpu_to_le32(0x01000000 + 0x100);
-		video_header.image_format = cpu_to_le32(0x9);
+		video_header.unk4 = cpu_to_le32(0x9);
+		// Guessed from pcap
+		video_header.width = cpu_to_le16(width * 3);
+		video_header.height = cpu_to_le16(0);
+		video_header.start_address = cpu_to_le32(0x60);
+		video_header.end_address = cpu_to_le32(0x60);
+		video_header.image_format = cpu_to_le32(TRIGGER6_BGR24_FORMAT);
+		memcpy(buf, &video_header, sizeof(video_header));
 
-		u8 random_bytes[256] = { 0 };
-		for (int i = 0; i < 0x100; i++) {
-			random_bytes[i] = i;
-		}
-
-		// pack video header with random bytes
-		memcpy(packet, &video_header,
-		       sizeof(struct trigger6_video_header));
-		memcpy(packet + sizeof(struct trigger6_video_header),
-		       random_bytes, sizeof(random_bytes));
-
-		ret = usb_bulk_msg(usb_dev,
-				   usb_sndbulkpipe(usb_dev,
-						   TRIGGER6_ENDPOINT_BULK_OUT),
-				   packet, sizeof(packet), NULL, 5000);
-
+		// Put BGR24 representation of framebuffer into buf
+		struct iosys_map map = IOSYS_MAP_INIT_VADDR(
+			buf + sizeof(struct trigger6_video_header));
+		ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 		if (ret < 0) {
-			drm_warn(&trigger6->drm, "Fuzz packet failed");
+			drm_warn(&trigger6->drm, "fb CPU access failed: %d",
+				 ret);
+		}
+		drm_fb_xrgb8888_to_rgb888(&map, NULL,
+					  &shadow_plane_state->data[0],
+					  state->fb, &current_rect);
+		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
+
+		size_t blocks =
+			DIV_ROUND_UP(buf_size, TRIGGER6_MAX_TRANSFER_LENGTH);
+		struct trigger6_session *session =
+			kzalloc(sizeof(struct trigger6_session), GFP_KERNEL);
+		void *transfer_block =
+			kmalloc(TRIGGER6_MAX_TRANSFER_LENGTH, GFP_KERNEL);
+
+		for (size_t i = 0; i < blocks; i++) {
+			size_t offset = i * TRIGGER6_MAX_TRANSFER_LENGTH;
+			size_t length =
+				min((i + 1) * TRIGGER6_MAX_TRANSFER_LENGTH,
+				    buf_size) -
+				offset;
+			session->session_number = 0;
+			session->payload_length = cpu_to_le32(buf_size);
+			session->dest_addr = cpu_to_le32(0x030);
+			session->fragment_length = cpu_to_le32(length);
+			session->output_index = cpu_to_le32(0x0);
+			session->offset = cpu_to_le32(offset);
+
+			ret = usb_bulk_msg(
+				usb_dev,
+				usb_sndbulkpipe(usb_dev,
+						TRIGGER6_ENDPOINT_BULK_OUT),
+				session, sizeof(struct trigger6_session), NULL,
+				5000);
+			if (ret < 0) {
+				drm_warn(&trigger6->drm,
+					 "Session negotiation failed: %d", ret);
+			}
+
+			memcpy(transfer_block, buf + offset, length);
+			ret = usb_bulk_msg(
+				usb_dev,
+				usb_sndbulkpipe(usb_dev,
+						TRIGGER6_ENDPOINT_BULK_OUT),
+				transfer_block, length, NULL, 5000);
+
+			if (ret < 0) {
+				drm_warn(&trigger6->drm,
+					 "Transfer block failed");
+			}
 		}
 
-		kfree(packet);
+		kfree(session);
+		kfree(transfer_block);
+		vfree(buf);
 	}
 }
 

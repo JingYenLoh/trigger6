@@ -1,4 +1,3 @@
-
 #ifndef TRIGGER6_H
 #define TRIGGER6_H
 
@@ -18,9 +17,11 @@
 #define DRIVER_MINOR 0
 #define DRIVER_PATCHLEVEL 1
 
-#define TRIGGER6_ENDPOINT_BULK_IN 0x1
-#define TRIGGER6_ENDPOINT_BULK_OUT 0x2
-#define TRIGGER6_ENDPOINT_INTERRUPT_IN 0x3
+#define TRIGGER6_ENDPOINT_BULK_IN	0x1
+#define TRIGGER6_ENDPOINT_BULK_OUT	0x2
+#define TRIGGER6_ENDPOINT_INTERRUPT_IN	0x3
+
+#define TRIGGER6_MAX_TRANSFER_LENGTH 0x19000
 
 struct trigger6_mode {
 	u32 pixel_clock_khz;
@@ -45,12 +46,16 @@ struct trigger6_session {
 	__le32 session_number;
 	__le32 payload_length;
 	__le32 dest_addr;
-	__le32 packet_length;
-	__le32 bytes_written;
+	__le32 fragment_length;
+	__le32 offset;
 	__le32 output_index;
 	__le32 unk7;
 	__le32 unk8;
 } __attribute__((packed));
+
+#define TRIGGER6_JPEG_FORMAT 0xD
+#define TRIGGER6_NV12_FORMAT 0x6
+#define TRIGGER6_BGR24_FORMAT 0x9
 
 struct trigger6_video_header {
 	__le32 type; // 0x3 = full, 0x4 = partial?, 0x7 = partial??
