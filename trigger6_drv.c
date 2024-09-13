@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/module.h>
+#include <linux/vmalloc.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
@@ -20,8 +21,6 @@
 #include <drm/drm_simple_kms_helper.h>
 
 #include "trigger6.h"
-
-#include "img.h"
 
 static int trigger6_usb_suspend(struct usb_interface *interface,
 				pm_message_t message)
@@ -156,7 +155,7 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 		height = drm_rect_height(&current_rect);
 
 		buf_size = sizeof(struct trigger6_video_header) +
-				  width * height * 3;
+			   width * height * 3;
 		void *buf = vmalloc(buf_size);
 		struct trigger6_video_header video_header = { 0 };
 		video_header.type = cpu_to_le32(0x3);
@@ -179,9 +178,12 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 			drm_warn(&trigger6->drm, "fb CPU access failed: %d",
 				 ret);
 		}
+		struct drm_format_conv_state fmtcnv_state =
+			DRM_FORMAT_CONV_STATE_INIT;
 		drm_fb_xrgb8888_to_rgb888(&map, NULL,
 					  &shadow_plane_state->data[0],
-					  state->fb, &current_rect);
+					  state->fb, &current_rect,
+					  &fmtcnv_state);
 		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
 		size_t blocks =
@@ -349,5 +351,6 @@ static struct usb_driver trigger6_driver = {
 	.resume = trigger6_usb_resume,
 	.id_table = id_table,
 };
+
 module_usb_driver(trigger6_driver);
 MODULE_LICENSE("GPL");
