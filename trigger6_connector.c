@@ -29,11 +29,19 @@ static int trigger6_connector_get_modes(struct drm_connector *connector)
 {
 	int ret;
 	struct trigger6_device *trigger6 = to_trigger6(connector->dev);
-	struct edid *edid;
-	edid = drm_do_get_edid(connector, trigger6_read_edid, trigger6);
-	drm_connector_update_edid_property(connector, edid);
-	ret = drm_add_edid_modes(connector, edid);
-	kfree(edid);
+	const struct drm_edid *edid;
+	edid = drm_edid_read_custom(connector, trigger6_read_edid, trigger6);
+	if (!edid)
+		return 0;
+	ret = drm_edid_connector_update(connector, edid);
+	if (ret < 0) {
+		ret = 0;
+		goto err_free_edid;
+	}
+	ret = drm_edid_connector_add_modes(connector);
+
+err_free_edid:
+	drm_edid_free(edid);
 	return ret;
 }
 
