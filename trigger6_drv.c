@@ -3,13 +3,14 @@
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_format_helper.h>
-#include <drm/drm_fbdev_ttm.h>
+#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
@@ -62,11 +63,11 @@ static const struct drm_driver driver = {
 	/* GEM hooks */
 	.fops = &trigger6_driver_fops,
 	DRM_GEM_SHMEM_DRIVER_OPS,
+	DRM_FBDEV_SHMEM_DRIVER_OPS,
 	.gem_prime_import = trigger6_driver_gem_prime_import,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,
@@ -135,8 +136,6 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 {
 	int ret;
 	struct trigger6_device *trigger6 = to_trigger6(pipe->crtc.dev);
-	struct usb_interface *intf = trigger6->intf;
-	struct usb_device *usb_dev = interface_to_usbdev(intf);
 	struct drm_plane_state *state = pipe->plane.state;
 	struct drm_shadow_plane_state *shadow_plane_state =
 		to_drm_shadow_plane_state(state);
@@ -144,7 +143,15 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 	size_t buf_size;
 	struct drm_rect current_rect;
 
-	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
+	if (!drm_atomic_helper_damage_merged(old_state, state, &current_rect))
+		return;
+
+	if (!wait_for_completion_timeout(&trigger6->transfer_done,
+					 msecs_to_jiffies(1000))) {
+		drm_warn(&trigger6->drm, "Previous frame transfer timed out");
+	}
+	reinit_completion(&trigger6->transfer_done);
+
 		// hack to force full screen updates for now
 		current_rect.x1 = 0;
 		current_rect.y1 = 0;
@@ -153,87 +160,37 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 
 		width = drm_rect_width(&current_rect);
 		height = drm_rect_height(&current_rect);
+	buf_size = sizeof(struct trigger6_video_header) + width * height * 3;
 
-		buf_size = sizeof(struct trigger6_video_header) +
-			   width * height * 3;
-		void *buf = vmalloc(buf_size);
-		struct trigger6_video_header video_header = { 0 };
-		video_header.type = cpu_to_le32(0x3);
-		video_header.data_length = cpu_to_le32(buf_size);
-		video_header.sequence_counter = cpu_to_le32(1);
-		video_header.unk4 = cpu_to_le32(0x9);
+	struct trigger6_video_header *hdr =
+		(struct trigger6_video_header *)trigger6->frame_data;
+	hdr->type = cpu_to_le32(0x3);
+	hdr->data_length = cpu_to_le32(buf_size);
+	hdr->sequence_counter = cpu_to_le32(1);
+	hdr->unk4 = cpu_to_le32(0x9);
 		// Guessed from pcap
-		video_header.width = cpu_to_le16(width * 3);
-		video_header.height = cpu_to_le16(0);
-		video_header.start_address = cpu_to_le32(0x60);
-		video_header.end_address = cpu_to_le32(0x60);
-		video_header.image_format = cpu_to_le32(TRIGGER6_BGR24_FORMAT);
-		memcpy(buf, &video_header, sizeof(video_header));
+	hdr->width = cpu_to_le16(width * 3);
+	hdr->height = cpu_to_le16(0);
+	hdr->start_address = cpu_to_le32(0x60);
+	hdr->end_address = cpu_to_le32(0x60);
+	hdr->image_format = cpu_to_le32(TRIGGER6_BGR24_FORMAT);
 
 		// Put BGR24 representation of framebuffer into buf
-		struct iosys_map map = IOSYS_MAP_INIT_VADDR(
-			buf + sizeof(struct trigger6_video_header));
 		ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 		if (ret < 0) {
-			drm_warn(&trigger6->drm, "fb CPU access failed: %d",
-				 ret);
-		}
-		struct drm_format_conv_state fmtcnv_state =
-			DRM_FORMAT_CONV_STATE_INIT;
-		drm_fb_xrgb8888_to_rgb888(&map, NULL,
-					  &shadow_plane_state->data[0],
-					  state->fb, &current_rect,
-					  &fmtcnv_state);
+		drm_warn(&trigger6->drm, "fb CPU access failed: %d", ret);
+		complete(&trigger6->transfer_done);
+		return;
+	}
+
+	struct iosys_map dst_map = IOSYS_MAP_INIT_VADDR(
+		trigger6->frame_data + sizeof(struct trigger6_video_header));
+	struct drm_format_conv_state fmtcnv_state = DRM_FORMAT_CONV_STATE_INIT;
+	drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, &shadow_plane_state->data[0],
+				  state->fb, &current_rect, &fmtcnv_state);
 		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
-		size_t blocks =
-			DIV_ROUND_UP(buf_size, TRIGGER6_MAX_TRANSFER_LENGTH);
-		struct trigger6_session *session =
-			kzalloc(sizeof(struct trigger6_session), GFP_KERNEL);
-		void *transfer_block =
-			kmalloc(TRIGGER6_MAX_TRANSFER_LENGTH, GFP_KERNEL);
-
-		for (size_t i = 0; i < blocks; i++) {
-			size_t offset = i * TRIGGER6_MAX_TRANSFER_LENGTH;
-			size_t length =
-				min((i + 1) * TRIGGER6_MAX_TRANSFER_LENGTH,
-				    buf_size) -
-				offset;
-			session->session_number = 0;
-			session->payload_length = cpu_to_le32(buf_size);
-			session->dest_addr = cpu_to_le32(0x030);
-			session->fragment_length = cpu_to_le32(length);
-			session->output_index = cpu_to_le32(0x0);
-			session->offset = cpu_to_le32(offset);
-
-			ret = usb_bulk_msg(
-				usb_dev,
-				usb_sndbulkpipe(usb_dev,
-						TRIGGER6_ENDPOINT_BULK_OUT),
-				session, sizeof(struct trigger6_session), NULL,
-				5000);
-			if (ret < 0) {
-				drm_warn(&trigger6->drm,
-					 "Session negotiation failed: %d", ret);
-			}
-
-			memcpy(transfer_block, buf + offset, length);
-			ret = usb_bulk_msg(
-				usb_dev,
-				usb_sndbulkpipe(usb_dev,
-						TRIGGER6_ENDPOINT_BULK_OUT),
-				transfer_block, length, NULL, 5000);
-
-			if (ret < 0) {
-				drm_warn(&trigger6->drm,
-					 "Transfer block failed");
-			}
-		}
-
-		kfree(session);
-		kfree(transfer_block);
-		vfree(buf);
-	}
+	trigger6_send_frame(trigger6, trigger6->frame_data, buf_size);
 }
 
 static const struct drm_simple_display_pipe_funcs trigger6_pipe_funcs = {
@@ -263,8 +220,6 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	trigger6->intf = interface;
 	dev = &trigger6->drm;
 
-	init_completion(&trigger6->transfer_done);
-
 	trigger6->dmadev = usb_intf_get_dma_device(interface);
 	if (!trigger6->dmadev)
 		drm_warn(dev,
@@ -274,24 +229,38 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
+	trigger6_read_modes(trigger6, 0, 0, trigger6->modes, 512);
+	trigger6_read_modes(trigger6, 0, 512, trigger6->modes + 16, 448);
+
+	size_t max_pixels = 0;
+	for (int i = 0; i < ARRAY_SIZE(trigger6->modes); i++) {
+		size_t pixels = (size_t)trigger6->modes[i].line_active_pixels *
+				trigger6->modes[i].frame_active_lines;
+		max_pixels = MAX(max_pixels, pixels);
+	}
+
+	trigger6->frame_data_size =
+		sizeof(struct trigger6_video_header) + max_pixels * 3;
+	trigger6->frame_data = vmalloc_32(trigger6->frame_data_size);
+	if (!trigger6->frame_data) {
+		ret = -ENOMEM;
+		goto err_put_device;
+	}
+
 	/* No idea */
+	ret = trigger6_init_urb(trigger6, trigger6->frame_data_size);
+	if (ret <= 0) {
+		vfree(trigger6->frame_data);
+		goto err_put_device;
+	}
+	init_completion(&trigger6->transfer_done);
+	complete(&trigger6->transfer_done);
+
 	dev->mode_config.min_width = 0;
 	dev->mode_config.max_width = 10000;
 	dev->mode_config.min_height = 0;
 	dev->mode_config.max_height = 10000;
 	dev->mode_config.funcs = &trigger6_mode_config_funcs;
-
-	// Might need
-	// trigger6_init_urb(trigger6, 100 * TRIGGER6_MAX_TRANSFER_LENGTH);
-	trigger6_read_modes(trigger6, 0, 0, trigger6->modes, 512);
-	trigger6_read_modes(trigger6, 0, 512, trigger6->modes + 16, 448);
-
-	for (int i = 0; i < ARRAY_SIZE(trigger6->modes); i++) {
-		drm_warn(dev, "mode %d: %dx%d@%d\n", i,
-			 trigger6->modes[i].line_active_pixels,
-			 trigger6->modes[i].frame_active_lines,
-			 trigger6->modes[i].refresh_rate_hz);
-	}
 
 	ret = trigger6_connector_init(trigger6);
 	if (ret)
@@ -316,7 +285,7 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
-	drm_fbdev_ttm_setup(dev, 0);
+	drm_client_setup(dev, NULL);
 
 	return 0;
 
@@ -333,6 +302,15 @@ static void trigger6_usb_disconnect(struct usb_interface *interface)
 	drm_kms_helper_poll_fini(dev);
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
+
+	if (!wait_for_completion_timeout(&trigger6->transfer_done,
+					 msecs_to_jiffies(5000)))
+		drm_warn(dev, "Timed out waiting for URBs during disconnect");
+
+	trigger6_free_urb(trigger6);
+	vfree(trigger6->frame_data);
+	trigger6->frame_data = NULL;
+
 	put_device(trigger6->dmadev);
 	trigger6->dmadev = NULL;
 }
@@ -344,7 +322,7 @@ static const struct usb_device_id id_table[] = {
 MODULE_DEVICE_TABLE(usb, id_table);
 
 static struct usb_driver trigger6_driver = {
-	.name = "trigger6",
+	.name = DRIVER_NAME,
 	.probe = trigger6_usb_probe,
 	.disconnect = trigger6_usb_disconnect,
 	.suspend = trigger6_usb_suspend,
@@ -354,3 +332,4 @@ static struct usb_driver trigger6_driver = {
 
 module_usb_driver(trigger6_driver);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION(DRIVER_DESC);

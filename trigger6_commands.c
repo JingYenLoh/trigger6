@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "trigger6.h"
 
 int trigger6_read_modes(struct trigger6_device *trigger6, int output_index,

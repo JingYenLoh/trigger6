@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/dma-buf.h>
 
@@ -35,10 +36,17 @@ void trigger6_urb_completion(struct urb *urb)
 	struct trigger6_device *trigger6 = urb_entry->parent;
 	unsigned long flags;
 
+	if (urb->status)
+		drm_warn(&trigger6->drm, "URB completed with status %d",
+			 urb->status);
+
 	spin_lock_irqsave(&trigger6->urb_available_list_lock, flags);
 	list_add_tail(&urb_entry->entry, &trigger6->urb_available_list);
 	spin_unlock_irqrestore(&trigger6->urb_available_list_lock, flags);
 	up(&trigger6->urb_available_list_sem);
+
+	if (atomic_dec_and_test(&trigger6->urbs_in_flight))
+		complete(&trigger6->transfer_done);
 }
 
 int trigger6_init_urb(struct trigger6_device *trigger6, size_t total_size)
@@ -67,9 +75,9 @@ int trigger6_init_urb(struct trigger6_device *trigger6, size_t total_size)
 		}
 		urb_entry->urb = urb;
 
-		urb_buf =
-			usb_alloc_coherent(usb_dev, TRIGGER6_MAX_TRANSFER_LENGTH,
-					   GFP_KERNEL, &urb->transfer_dma);
+		urb_buf = usb_alloc_coherent(usb_dev,
+					     TRIGGER6_MAX_TRANSFER_LENGTH,
+					     GFP_KERNEL, &urb->transfer_dma);
 
 		if (!urb_buf) {
 			usb_free_urb(urb);
@@ -106,89 +114,61 @@ struct urb *trigger6_get_urb(struct trigger6_device *trigger6)
 	return urb_entry->urb;
 }
 
-static const unsigned char trigger6_end_of_buffer[8] = { 0xff, 0xc0, 0x00, 0x00,
-						       0x00, 0x00, 0x00, 0x00 };
-
-void trigger6_fb_send_rect(struct drm_framebuffer *fb,
-			 const struct iosys_map *map, struct drm_rect *rect)
+void trigger6_send_frame(struct trigger6_device *trigger6, void *buf,
+			 size_t buf_size)
 {
-	int ret, i;
-	void *vaddr = map->vaddr;
-	struct trigger6_device *trigger6 = to_trigger6(fb->dev);
-	struct drm_device *drm = &trigger6->drm;
-	struct trigger6_frame_update_header header;
-	struct urb *urb;
-	void *transfer_buffer;
-	int total_length = 0;
-	int transfer_blocks, transfer_length;
-	/* Hardware can only update framebuffer in multiples of 16 horizontally */
-	int x = ALIGN_DOWN(rect->x1, 16);
-	int width = ALIGN(rect->x2, 16) - x;
-	int y1 = rect->y1;
-	int y2 = rect->y2;
 	int idx;
+	size_t chunks = DIV_ROUND_UP(buf_size, TRIGGER6_MAX_TRANSFER_LENGTH);
 
-	drm_dev_enter(drm, &idx);
+	if (!drm_dev_enter(&trigger6->drm, &idx))
+		return;
 
-	rect->x1 = x;
-	rect->x2 = x + width;
+	for (size_t i = 0; i < chunks; i++) {
+		size_t offset = i * TRIGGER6_MAX_TRANSFER_LENGTH;
+		size_t length = min(buf_size - offset,
+				    (size_t)TRIGGER6_MAX_TRANSFER_LENGTH);
+		struct urb *urb;
+		struct trigger6_session session = { 0 };
+		int ret;
 
-	header.header = cpu_to_be16(0xff00);
-	header.x = x / 16;
-	header.y = cpu_to_be16(y1);
-	header.width = width / 16;
-	header.height = cpu_to_be16(drm_rect_height(rect));
+		session.session_number = 0;
+		session.payload_length = cpu_to_le32(buf_size);
+		session.dest_addr = cpu_to_le32(0x030);
+		session.fragment_length = cpu_to_le32(length);
+		session.output_index = cpu_to_le32(0x0);
+		session.offset = cpu_to_le32(offset);
 
-	transfer_buffer =
-		vmalloc(drm_rect_width(rect) * drm_rect_height(rect) * 2 + 16);
-	if (!transfer_buffer)
-		goto dev_exit;
-
-	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
-	if (ret < 0)
-		goto free_transfer_buffer;
-
-	memcpy(transfer_buffer, &header, 8);
-	total_length += 8;
-
-	for (i = y1; i < y2; i++) {
-		const int line_offset = fb->pitches[0] * i;
-		const int byte_offset = line_offset + (x * 4);
-		trigger6_xrgb_to_yuv422_line(transfer_buffer + total_length,
-					   vaddr + byte_offset, width);
-		total_length += width * 2;
-	}
-
-	memcpy(transfer_buffer + total_length, trigger6_end_of_buffer, 8);
-	total_length += 8;
-
-	transfer_blocks =
-		DIV_ROUND_UP(total_length, TRIGGER6_MAX_TRANSFER_LENGTH);
-
-	for (i = 0; i < transfer_blocks; i++) {
-		/* Last block may be shorter */
 		urb = trigger6_get_urb(trigger6);
 		if (IS_ERR(urb))
-			break;
-		transfer_length = min((i + 1) * TRIGGER6_MAX_TRANSFER_LENGTH,
-				      total_length) -
-				  i * TRIGGER6_MAX_TRANSFER_LENGTH;
-
-		memcpy(urb->transfer_buffer,
-		       transfer_buffer + i * TRIGGER6_MAX_TRANSFER_LENGTH,
-		       transfer_length);
-		urb->transfer_buffer_length = transfer_length;
-		urb->complete = trigger6_urb_completion;
+			goto out;
+		memcpy(urb->transfer_buffer, &session, sizeof(session));
+		urb->transfer_buffer_length = sizeof(session);
+		atomic_inc(&trigger6->urbs_in_flight);
 		ret = usb_submit_urb(urb, GFP_KERNEL);
-		if (ret < 0) {
+		if (ret) {
+			drm_warn(&trigger6->drm,
+				 "Session URB submit failed: %d", ret);
 			trigger6_urb_completion(urb);
-			break;
+			goto out;
+		}
+
+		urb = trigger6_get_urb(trigger6);
+		if (IS_ERR(urb))
+			goto out;
+		memcpy(urb->transfer_buffer, buf + offset, length);
+		urb->transfer_buffer_length = length;
+		atomic_inc(&trigger6->urbs_in_flight);
+		ret = usb_submit_urb(urb, GFP_KERNEL);
+		if (ret) {
+			drm_warn(&trigger6->drm,
+				 "Payload URB submit failed: %d", ret);
+			trigger6_urb_completion(urb);
+			goto out;
 		}
 	}
 
-	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
-free_transfer_buffer:
-	vfree(transfer_buffer);
-dev_exit:
+out:
+	if (atomic_read(&trigger6->urbs_in_flight) == 0)
+		complete(&trigger6->transfer_done);
 	drm_dev_exit(idx);
 }
