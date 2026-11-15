@@ -11,7 +11,9 @@
 #include <drm/drm_device.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_encoder.h>
+#include <drm/drm_plane.h>
 #include <drm/drm_print.h>
 
 struct drm_format_conv_state;
@@ -94,9 +96,10 @@ struct trigger6_device {
 	struct usb_interface *intf;
 	struct device *dmadev;
 
+	struct drm_plane plane;
+	struct drm_crtc crtc;
+	struct drm_encoder encoder;
 	struct drm_connector connector;
-	// TODO Handle more pipes
-	struct drm_simple_display_pipe display_pipe;
 
 	struct trigger6_mode modes[30];
 
@@ -126,8 +129,5 @@ void trigger6_send_frame(struct trigger6_device *trigger6,
 			 struct drm_framebuffer *fb, const struct iosys_map *src,
 			 const struct drm_rect *rect,
 			 struct drm_format_conv_state *fmtcnv_state);
-enum drm_mode_status
-trigger6_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
-			 const struct drm_display_mode *mode);
 
 #endif
