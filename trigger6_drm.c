@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include <linux/minmax.h>
+#include <linux/rational.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
@@ -26,10 +26,15 @@
 
 #include "trigger6.h"
 
-/* Mode table size per output, as read by the Windows driver */
-static const int trigger6_mode_table_size[TRIGGER6_NUM_OUTPUTS] = { 1152, 960 };
+/* clock = ref / 32 * (integer + numerator / denominator) * multiplier */
+static const u32 trigger6_pll_ref_khz[] = {
+	48000,	/* Lite, unverified */
+	40000,	/* Super Lite */
+};
 
-#define TRIGGER6_MODE_TABLE_CHUNK	512
+/* Verified on the Super Lite */
+#define TRIGGER6_MIN_CLOCK_KHZ	25000
+#define TRIGGER6_MAX_CLOCK_KHZ	297000
 
 #define plane_to_output(x) container_of(x, struct trigger6_output, plane)
 #define crtc_to_output(x) container_of(x, struct trigger6_output, crtc)
@@ -64,42 +69,40 @@ trigger6_mode_config_helper_funcs = {
 	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
 };
 
-static int trigger6_read_mode_table(struct trigger6_output *output)
+static void trigger6_compute_mode(struct trigger6_device *trigger6,
+				  const struct drm_display_mode *mode,
+				  struct trigger6_mode *dst)
 {
-	int size = trigger6_mode_table_size[output->index];
-	u8 *buf = (u8 *)output->modes;
-	int offset, len, ret;
+	/* x1, x2, x4 and x8, keeping the integer within 20..39 like Windows */
+	static const u8 multipliers[] = { 0x0, 0x2, 0x1, 0x3 };
+	int step = trigger6->pll_step_khz, shift = 0;
+	unsigned long num, den;
 
-	BUILD_BUG_ON(sizeof(output->modes) < 1152);
-
-	for (offset = 0; offset < size; offset += len) {
-		len = min(size - offset, TRIGGER6_MODE_TABLE_CHUNK);
-		ret = trigger6_read_modes(output->trigger6, output->index,
-					  offset, buf + offset, len);
-		if (ret)
-			return ret;
+	while (shift < 3 && mode->clock >= step * 40) {
+		step <<= 1;
+		shift++;
 	}
+	rational_best_approximation(mode->clock % step, step, U16_MAX, U16_MAX,
+				    &num, &den);
 
-	return 0;
-}
-
-static struct trigger6_mode *
-trigger6_get_mode(struct trigger6_output *output,
-		  const struct drm_display_mode *mode)
-{
-	u16 width = mode->hdisplay;
-	u16 height = mode->vdisplay;
-	u16 hz = drm_mode_vrefresh(mode);
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(output->modes); i++) {
-		if (output->modes[i].line_active_pixels == width &&
-		    output->modes[i].frame_active_lines == height &&
-		    output->modes[i].refresh_rate_hz == hz)
-			return &output->modes[i];
-	}
-
-	return ERR_PTR(-EINVAL);
+	*dst = (struct trigger6_mode) {
+		.clock_khz = cpu_to_le32(mode->clock),
+		.refresh_hz = cpu_to_le16(drm_mode_vrefresh(mode)),
+		.htotal = cpu_to_le16(mode->htotal),
+		.hdisplay = cpu_to_le16(mode->hdisplay),
+		.hsync_start = cpu_to_le16(mode->hsync_start),
+		.hsync_width = cpu_to_le16(mode->hsync_end - mode->hsync_start),
+		.vtotal = cpu_to_le16(mode->vtotal),
+		.vdisplay = cpu_to_le16(mode->vdisplay),
+		.vsync_start = cpu_to_le16(mode->vsync_start),
+		.vsync_width = cpu_to_le16(mode->vsync_end - mode->vsync_start),
+		.pll_numerator = cpu_to_le16(num),
+		.pll_denominator = cpu_to_le16(den),
+		.pll_integer = mode->clock / step,
+		.pll_multiplier = multipliers[shift],
+		.hsync_positive = !!(mode->flags & DRM_MODE_FLAG_PHSYNC),
+		.vsync_positive = !!(mode->flags & DRM_MODE_FLAG_PVSYNC),
+	};
 }
 
 static int trigger6_plane_atomic_check(struct drm_plane *plane,
@@ -184,7 +187,7 @@ static void trigger6_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct trigger6_output *output = crtc_to_output(crtc);
 	struct drm_crtc_state *crtc_state =
 		drm_atomic_get_new_crtc_state(state, crtc);
-	struct trigger6_mode *mode;
+	struct trigger6_mode mode;
 	int idx;
 
 	if (!drm_dev_enter(crtc->dev, &idx))
@@ -193,10 +196,9 @@ static void trigger6_crtc_atomic_enable(struct drm_crtc *crtc,
 	trigger6_enable_output(output->trigger6, output->index);
 
 	if (crtc_state->mode_changed) {
-		mode = trigger6_get_mode(output, &crtc_state->adjusted_mode);
-		if (!IS_ERR(mode))
-			trigger6_set_resolution(output->trigger6, output->index,
-						mode);
+		trigger6_compute_mode(output->trigger6,
+				      &crtc_state->adjusted_mode, &mode);
+		trigger6_set_resolution(output->trigger6, output->index, &mode);
 	}
 
 	drm_dev_exit(idx);
@@ -222,7 +224,18 @@ trigger6_crtc_mode_valid(struct drm_crtc *crtc,
 {
 	struct trigger6_output *output = crtc_to_output(crtc);
 
-	return IS_ERR(trigger6_get_mode(output, mode)) ? MODE_BAD : MODE_OK;
+	if (!trigger6_frame_fits(output, mode->hdisplay, mode->vdisplay))
+		return MODE_MEM;
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+		return MODE_NO_INTERLACE;
+	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
+		return MODE_NO_DBLESCAN;
+	if (mode->clock < TRIGGER6_MIN_CLOCK_KHZ)
+		return MODE_CLOCK_LOW;
+	if (mode->clock > TRIGGER6_MAX_CLOCK_KHZ)
+		return MODE_CLOCK_HIGH;
+
+	return MODE_OK;
 }
 
 static const struct drm_crtc_helper_funcs trigger6_crtc_helper_funcs = {
@@ -326,10 +339,6 @@ static int trigger6_output_init(struct trigger6_device *trigger6, int index)
 	output->trigger6 = trigger6;
 	output->index = index;
 
-	ret = trigger6_read_mode_table(output);
-	if (ret)
-		return ret;
-
 	ret = trigger6_alloc_pool(trigger6, &output->pool,
 				  TRIGGER6_URB_BUF_SIZE);
 	if (ret)
@@ -397,6 +406,20 @@ struct trigger6_device *trigger6_drm_create(struct usb_interface *interface)
 	trigger6->intf = interface;
 	spin_lock_init(&trigger6->bulk_lock);
 	dev = &trigger6->drm;
+
+	ret = trigger6_read_platform(trigger6);
+	if (ret < 0)
+		return ERR_PTR(ret);
+	if (ret >= ARRAY_SIZE(trigger6_pll_ref_khz)) {
+		drm_err(dev, "Unknown hardware platform %d\n", ret);
+		return ERR_PTR(-ENODEV);
+	}
+	trigger6->pll_step_khz = trigger6_pll_ref_khz[ret] / 32;
+
+	ret = trigger6_read_vram_size(trigger6);
+	if (ret < 0)
+		return ERR_PTR(ret);
+	trigger6->vram_size = ret * SZ_1M;
 
 	dma_dev = usb_intf_get_dma_device(interface);
 	if (dma_dev) {

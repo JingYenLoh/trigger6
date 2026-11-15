@@ -14,6 +14,18 @@ static const u32 trigger6_frame_addr[TRIGGER6_NUM_OUTPUTS] = {
 	0x30, 0x2500400
 };
 
+/* Each output's frame ends where the next output's begins */
+bool trigger6_frame_fits(struct trigger6_output *output, int width, int height)
+{
+	int next = output->index + 1;
+	u32 end = next < TRIGGER6_NUM_OUTPUTS ? trigger6_frame_addr[next] :
+						output->trigger6->vram_size;
+
+	return trigger6_frame_addr[output->index] +
+	       sizeof(struct trigger6_video_header) +
+	       (u64)ALIGN(width * 3, 16) * height <= end;
+}
+
 static void trigger6_urb_complete(struct urb *urb)
 {
 	struct trigger6_transfer *transfer = urb->context;

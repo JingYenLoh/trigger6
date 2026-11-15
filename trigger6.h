@@ -40,29 +40,30 @@ struct snd_pcm_substream;
 #define TRIGGER6_ENDPOINT_INTERRUPT_IN	0x3
 
 #define TRIGGER6_NUM_OUTPUTS	2
-#define TRIGGER6_MAX_MODES	36
 
 #define TRIGGER6_NUM_TRANSFERS	8
 #define TRIGGER6_URB_BUF_SIZE	SZ_128K
 #define TRIGGER6_BULK_TIMEOUT_MS	2000
 
 struct trigger6_mode {
-	u32 pixel_clock_khz;
-	u16 refresh_rate_hz;
-	u16 line_total_pixels;
-	u16 line_active_pixels;
-	u16 line_active_plus_front_porch_pixels;
-	u16 line_sync_width;
-	u16 frame_total_lines;
-	u16 frame_active_lines;
-	u16 frame_active_plus_front_porch_lines;
-	u16 frame_sync_width;
-	u16 unk8;
-	u16 unk9;
-	u16 unk10;
-	u8 sync_polarity_0;
-	u8 sync_polarity_1;
-	u16 unk11;
+	__le32 clock_khz;
+	__le16 refresh_hz;
+	__le16 htotal;
+	__le16 hdisplay;
+	/* Sync starts one early and lasts one longer, also on Windows */
+	__le16 hsync_start;
+	__le16 hsync_width;
+	__le16 vtotal;
+	__le16 vdisplay;
+	__le16 vsync_start;
+	__le16 vsync_width;
+	__le16 pll_numerator;
+	__le16 pll_denominator;
+	u8 pll_integer;
+	u8 pll_multiplier;	// bit 0: x4, bit 1: x2
+	u8 hsync_positive;
+	u8 vsync_positive;
+	__le16 unk11;
 } __packed;
 
 #define TRIGGER6_SESSION_VIDEO	0
@@ -128,8 +129,6 @@ struct trigger6_output {
 	struct drm_encoder encoder;
 	struct drm_connector connector;
 
-	struct trigger6_mode modes[TRIGGER6_MAX_MODES];
-
 	struct trigger6_pool pool;
 };
 
@@ -155,6 +154,8 @@ struct trigger6_device {
 	struct usb_interface *intf;
 	/* Keeps each session next to its data on the shared bulk endpoint */
 	spinlock_t bulk_lock;
+	u32 pll_step_khz;
+	u32 vram_size;
 	struct trigger6_output outputs[TRIGGER6_NUM_OUTPUTS];
 	struct trigger6_audio audio;
 };
@@ -164,8 +165,8 @@ struct trigger6_device {
 struct trigger6_device *trigger6_drm_create(struct usb_interface *intf);
 void trigger6_drm_destroy(struct trigger6_device *trigger6);
 
-int trigger6_read_modes(struct trigger6_device *trigger6, int output,
-			int byte_offset, void *data, int length);
+int trigger6_read_platform(struct trigger6_device *trigger6);
+int trigger6_read_vram_size(struct trigger6_device *trigger6);
 int trigger6_read_connector_status(struct trigger6_device *trigger6,
 				   int output);
 int trigger6_read_edid(struct trigger6_device *trigger6, int output,
@@ -189,6 +190,7 @@ void trigger6_fill_session(struct trigger6_transfer *transfer, u32 number,
 			   size_t len);
 int trigger6_submit_transfer(struct trigger6_transfer *transfer, size_t len);
 
+bool trigger6_frame_fits(struct trigger6_output *output, int width, int height);
 void trigger6_send_frame(struct trigger6_output *output,
 			 struct drm_framebuffer *fb, const struct iosys_map *src,
 			 const struct drm_rect *rect,

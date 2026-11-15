@@ -2,15 +2,37 @@
 
 #include "trigger6.h"
 
-int trigger6_read_modes(struct trigger6_device *trigger6, int output,
-			int byte_offset, void *data, int length)
+int trigger6_read_platform(struct trigger6_device *trigger6)
 {
 	struct usb_device *usb_dev = interface_to_usbdev(trigger6->intf);
+	__le32 platform;
+	int ret;
 
-	return usb_control_msg_recv(usb_dev, 0, 0x89,
-				    USB_DIR_IN | USB_TYPE_VENDOR, output,
-				    byte_offset, data, length,
-				    USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	ret = usb_control_msg_recv(usb_dev, 0, 0xb0,
+				   USB_DIR_IN | USB_TYPE_VENDOR, 0, 0,
+				   &platform, sizeof(platform),
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	return le32_to_cpu(platform);
+}
+
+/* In MiB */
+int trigger6_read_vram_size(struct trigger6_device *trigger6)
+{
+	struct usb_device *usb_dev = interface_to_usbdev(trigger6->intf);
+	u8 size;
+	int ret;
+
+	ret = usb_control_msg_recv(usb_dev, 0, 0x88,
+				   USB_DIR_IN | USB_TYPE_VENDOR, 0, 0,
+				   &size, sizeof(size),
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	return size;
 }
 
 int trigger6_read_connector_status(struct trigger6_device *trigger6,
