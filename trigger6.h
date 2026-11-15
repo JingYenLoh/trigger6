@@ -94,7 +94,6 @@ struct trigger6_transfer {
 struct trigger6_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
-	struct device *dmadev;
 
 	struct drm_plane plane;
 	struct drm_crtc crtc;

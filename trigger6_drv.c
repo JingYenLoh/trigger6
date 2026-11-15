@@ -46,23 +46,6 @@ static int trigger6_usb_resume(struct usb_interface *interface)
 	return drm_mode_config_helper_resume(&trigger6->drm);
 }
 
-/*
- * FIXME: Dma-buf sharing requires DMA support by the importing device.
- *        This function is a workaround to make USB devices work as well.
- *        See todo.rst for how to fix the issue in the dma-buf framework.
- */
-static struct drm_gem_object *
-trigger6_driver_gem_prime_import(struct drm_device *dev,
-				 struct dma_buf *dma_buf)
-{
-	struct trigger6_device *trigger6 = to_trigger6(dev);
-
-	if (!trigger6->dmadev)
-		return ERR_PTR(-ENODEV);
-
-	return drm_gem_prime_import_dev(dev, dma_buf, trigger6->dmadev);
-}
-
 DEFINE_DRM_GEM_FOPS(trigger6_driver_fops);
 
 static const struct drm_driver driver = {
@@ -72,7 +55,6 @@ static const struct drm_driver driver = {
 	.fops = &trigger6_driver_fops,
 	DRM_GEM_SHMEM_DRIVER_OPS,
 	DRM_FBDEV_SHMEM_DRIVER_OPS,
-	.gem_prime_import = trigger6_driver_gem_prime_import,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
@@ -262,6 +244,7 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	int ret;
 	struct trigger6_device *trigger6;
 	struct drm_device *dev;
+	struct device *dma_dev;
 
 	trigger6 = devm_drm_dev_alloc(&interface->dev, &driver,
 				      struct trigger6_device, drm);
@@ -271,14 +254,18 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	trigger6->intf = interface;
 	dev = &trigger6->drm;
 
-	trigger6->dmadev = usb_intf_get_dma_device(interface);
-	if (!trigger6->dmadev)
+	dma_dev = usb_intf_get_dma_device(interface);
+	if (dma_dev) {
+		drm_dev_set_dma_dev(dev, dma_dev);
+		put_device(dma_dev);
+	} else {
 		drm_warn(dev,
 			 "buffer sharing not supported"); /* not an error */
+	}
 
 	ret = drmm_mode_config_init(dev);
 	if (ret)
-		goto err_put_device;
+		return ret;
 
 	trigger6_read_modes(trigger6, 0, 0, trigger6->modes, 512);
 	trigger6_read_modes(trigger6, 0, 512, trigger6->modes + 16, 448);
@@ -346,8 +333,6 @@ err_poll_fini:
 	usb_set_intfdata(interface, NULL);
 err_free_urbs:
 	trigger6_free_urbs(trigger6);
-err_put_device:
-	put_device(trigger6->dmadev);
 	return ret;
 }
 
@@ -361,9 +346,6 @@ static void trigger6_usb_disconnect(struct usb_interface *interface)
 	drm_atomic_helper_shutdown(dev);
 	trigger6_stop_io(trigger6);
 	trigger6_free_urbs(trigger6);
-
-	put_device(trigger6->dmadev);
-	trigger6->dmadev = NULL;
 }
 
 static const struct usb_device_id id_table[] = {
