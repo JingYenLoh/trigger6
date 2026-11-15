@@ -1,6 +1,7 @@
 trigger6-y := \
+	trigger6_audio.o \
 	trigger6_commands.o \
-	trigger6_connector.o \
+	trigger6_drm.o \
 	trigger6_drv.o \
 	trigger6_transfer.o
 
