@@ -39,33 +39,67 @@ static void trigger6_urb_complete(struct urb *urb)
 }
 
 static struct trigger6_transfer *
-trigger6_get_next_urb(struct trigger6_output *output)
+trigger6_get_next_transfer(struct trigger6_output *output)
 {
 	struct trigger6_transfer *transfer =
 		&output->transfers[output->next_transfer];
+	unsigned long timeout = msecs_to_jiffies(TRIGGER6_BULK_TIMEOUT_MS);
 
-	if (!wait_for_completion_timeout(&transfer->done,
-					 msecs_to_jiffies(TRIGGER6_BULK_TIMEOUT_MS))) {
-		drm_err_ratelimited(&output->trigger6->drm,
-				    "USB transfer timed out\n");
-		return ERR_PTR(-ETIMEDOUT);
+	timeout = wait_for_completion_timeout(&transfer->done, timeout);
+	if (!timeout)
+		goto err_timeout;
+
+	if (!wait_for_completion_timeout(&transfer->done, timeout)) {
+		/* Give back the completion of the URB that did finish */
+		complete(&transfer->done);
+		goto err_timeout;
 	}
 
-	output->next_transfer = (output->next_transfer + 1) % TRIGGER6_NUM_URBS;
+	output->next_transfer = (output->next_transfer + 1) %
+				TRIGGER6_NUM_TRANSFERS;
 
 	return transfer;
+
+err_timeout:
+	drm_err_ratelimited(&output->trigger6->drm, "USB transfer timed out\n");
+	return ERR_PTR(-ETIMEDOUT);
 }
 
-static int trigger6_submit_urb(struct trigger6_transfer *transfer, size_t len)
+static void trigger6_fill_session(struct trigger6_transfer *transfer,
+				  size_t payload_len, size_t offset, size_t len)
 {
+	struct trigger6_session *session =
+		transfer->session_urb->transfer_buffer;
+
+	memset(session, 0, sizeof(*session));
+	session->payload_length = cpu_to_le32(payload_len);
+	session->dest_addr =
+		cpu_to_le32(trigger6_frame_addr[transfer->output->index]);
+	session->fragment_length = cpu_to_le32(len);
+	session->offset = cpu_to_le32(offset);
+	session->output_index = cpu_to_le32(0);
+}
+
+static int trigger6_submit_transfer(struct trigger6_transfer *transfer,
+				    size_t len)
+{
+	struct trigger6_device *trigger6 = transfer->output->trigger6;
 	int ret;
 
-	transfer->urb->transfer_buffer_length = len;
-	ret = usb_submit_urb(transfer->urb, GFP_KERNEL);
-	if (ret) {
-		drm_err_once(&transfer->output->trigger6->drm,
-			     "failed to submit USB transfer: %d\n", ret);
+	transfer->data_urb->transfer_buffer_length = len;
+
+	mutex_lock(&trigger6->bulk_lock);
+	ret = usb_submit_urb(transfer->session_urb, GFP_KERNEL);
+	if (ret)
 		complete(&transfer->done);
+	else
+		ret = usb_submit_urb(transfer->data_urb, GFP_KERNEL);
+	mutex_unlock(&trigger6->bulk_lock);
+
+	if (ret) {
+		complete(&transfer->done);
+		drm_err_once(&trigger6->drm,
+			     "failed to submit USB transfer: %d\n", ret);
 	}
 
 	return ret;
@@ -75,76 +109,78 @@ void trigger6_stop_io(struct trigger6_output *output)
 {
 	int i;
 
-	for (i = 0; i < TRIGGER6_NUM_URBS; i++)
-		usb_kill_urb(output->transfers[i].urb);
+	for (i = 0; i < TRIGGER6_NUM_TRANSFERS; i++) {
+		usb_kill_urb(output->transfers[i].session_urb);
+		usb_kill_urb(output->transfers[i].data_urb);
+	}
 }
 
 void trigger6_free_urbs(struct trigger6_output *output)
 {
 	int i;
 
-	for (i = 0; i < TRIGGER6_NUM_URBS; i++) {
-		usb_free_urb(output->transfers[i].urb);
-		output->transfers[i].urb = NULL;
+	for (i = 0; i < TRIGGER6_NUM_TRANSFERS; i++) {
+		usb_free_urb(output->transfers[i].session_urb);
+		usb_free_urb(output->transfers[i].data_urb);
+		output->transfers[i].session_urb = NULL;
+		output->transfers[i].data_urb = NULL;
 	}
+}
+
+static struct urb *trigger6_alloc_urb(struct trigger6_transfer *transfer,
+				      size_t size)
+{
+	struct usb_device *udev =
+		interface_to_usbdev(transfer->output->trigger6->intf);
+	struct urb *urb;
+	void *buf;
+
+	urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!urb)
+		return NULL;
+
+	buf = kmalloc(size, GFP_KERNEL);
+	if (!buf) {
+		usb_free_urb(urb);
+		return NULL;
+	}
+
+	usb_fill_bulk_urb(urb, udev,
+			  usb_sndbulkpipe(udev, TRIGGER6_ENDPOINT_BULK_OUT),
+			  buf, size, trigger6_urb_complete, transfer);
+	urb->transfer_flags |= URB_FREE_BUFFER;
+
+	return urb;
 }
 
 int trigger6_alloc_urbs(struct trigger6_output *output)
 {
-	struct usb_device *udev = interface_to_usbdev(output->trigger6->intf);
 	struct trigger6_transfer *transfer;
-	struct urb *urb;
-	void *buf;
 	int i;
 
-	for (i = 0; i < TRIGGER6_NUM_URBS; i++) {
+	for (i = 0; i < TRIGGER6_NUM_TRANSFERS; i++) {
 		transfer = &output->transfers[i];
-
-		urb = usb_alloc_urb(0, GFP_KERNEL);
-		if (!urb)
-			return -ENOMEM;
-		transfer->urb = urb;
-
-		buf = kmalloc(TRIGGER6_URB_BUF_SIZE, GFP_KERNEL);
-		if (!buf)
-			return -ENOMEM;
-
-		usb_fill_bulk_urb(urb, udev,
-				  usb_sndbulkpipe(udev, TRIGGER6_ENDPOINT_BULK_OUT),
-				  buf,
-				  TRIGGER6_URB_BUF_SIZE, trigger6_urb_complete,
-				  transfer);
-		urb->transfer_flags |= URB_FREE_BUFFER;
-
 		transfer->output = output;
+
+		transfer->session_urb =
+			trigger6_alloc_urb(transfer,
+					   sizeof(struct trigger6_session));
+		if (!transfer->session_urb)
+			return -ENOMEM;
+
+		transfer->data_urb = trigger6_alloc_urb(transfer,
+							TRIGGER6_URB_BUF_SIZE);
+		if (!transfer->data_urb)
+			return -ENOMEM;
+
 		init_completion(&transfer->done);
+		complete(&transfer->done);
 		complete(&transfer->done);
 	}
 
 	output->next_transfer = 0;
 
 	return 0;
-}
-
-static int trigger6_send_session(struct trigger6_output *output,
-				 size_t payload_len, size_t offset, size_t len)
-{
-	struct trigger6_transfer *transfer;
-	struct trigger6_session *session;
-
-	transfer = trigger6_get_next_urb(output);
-	if (IS_ERR(transfer))
-		return PTR_ERR(transfer);
-
-	session = transfer->urb->transfer_buffer;
-	memset(session, 0, sizeof(*session));
-	session->payload_length = cpu_to_le32(payload_len);
-	session->dest_addr = cpu_to_le32(trigger6_frame_addr[output->index]);
-	session->fragment_length = cpu_to_le32(len);
-	session->offset = cpu_to_le32(offset);
-	session->output_index = cpu_to_le32(0);
-
-	return trigger6_submit_urb(transfer, sizeof(*session));
 }
 
 void trigger6_send_frame(struct trigger6_output *output,
@@ -172,16 +208,13 @@ void trigger6_send_frame(struct trigger6_output *output,
 	if (WARN_ON_ONCE(!lines_per_urb))
 		goto exit;
 
-	mutex_lock(&trigger6->bulk_lock);
-
-	if (trigger6_send_session(output, payload_len, 0, sizeof(*hdr)))
-		goto unlock;
-
-	transfer = trigger6_get_next_urb(output);
+	transfer = trigger6_get_next_transfer(output);
 	if (IS_ERR(transfer))
-		goto unlock;
+		goto exit;
 
-	hdr = transfer->urb->transfer_buffer;
+	trigger6_fill_session(transfer, payload_len, 0, sizeof(*hdr));
+
+	hdr = transfer->data_urb->transfer_buffer;
 	memset(hdr, 0, sizeof(*hdr));
 	hdr->type = cpu_to_le32(3 + output->index);
 	hdr->data_length = cpu_to_le32(payload_len);
@@ -194,8 +227,8 @@ void trigger6_send_frame(struct trigger6_output *output,
 	hdr->end_address = cpu_to_le32(start);
 	hdr->image_format = cpu_to_le32(TRIGGER6_BGR24_FORMAT);
 
-	if (trigger6_submit_urb(transfer, sizeof(*hdr)))
-		goto unlock;
+	if (trigger6_submit_transfer(transfer, sizeof(*hdr)))
+		goto exit;
 
 	offset = sizeof(*hdr);
 	clip = *rect;
@@ -204,25 +237,23 @@ void trigger6_send_frame(struct trigger6_output *output,
 		clip.y2 = min(y + lines_per_urb, rect->y2);
 		len = pitch * drm_rect_height(&clip);
 
-		if (trigger6_send_session(output, payload_len, offset, len))
-			break;
-
-		transfer = trigger6_get_next_urb(output);
+		transfer = trigger6_get_next_transfer(output);
 		if (IS_ERR(transfer))
 			break;
 
-		iosys_map_set_vaddr(&data_map, transfer->urb->transfer_buffer);
+		trigger6_fill_session(transfer, payload_len, offset, len);
+
+		iosys_map_set_vaddr(&data_map,
+				    transfer->data_urb->transfer_buffer);
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL, src, fb, &clip,
 					  fmtcnv_state);
 
-		if (trigger6_submit_urb(transfer, len))
+		if (trigger6_submit_transfer(transfer, len))
 			break;
 
 		offset += len;
 	}
 
-unlock:
-	mutex_unlock(&trigger6->bulk_lock);
 exit:
 	drm_dev_exit(idx);
 }

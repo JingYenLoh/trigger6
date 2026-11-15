@@ -35,7 +35,7 @@ struct iosys_map;
 #define TRIGGER6_NUM_OUTPUTS	2
 #define TRIGGER6_MAX_MODES	36
 
-#define TRIGGER6_NUM_URBS	8
+#define TRIGGER6_NUM_TRANSFERS	8
 #define TRIGGER6_URB_BUF_SIZE	SZ_128K
 #define TRIGGER6_BULK_TIMEOUT_MS	2000
 
@@ -91,7 +91,9 @@ struct trigger6_video_header {
 
 struct trigger6_transfer {
 	struct trigger6_output *output;
-	struct urb *urb;
+	struct urb *session_urb;
+	struct urb *data_urb;
+	/* Completed once by each of the two URBs */
 	struct completion done;
 };
 
@@ -107,13 +109,13 @@ struct trigger6_output {
 	struct trigger6_mode modes[TRIGGER6_MAX_MODES];
 
 	int next_transfer;
-	struct trigger6_transfer transfers[TRIGGER6_NUM_URBS];
+	struct trigger6_transfer transfers[TRIGGER6_NUM_TRANSFERS];
 };
 
 struct trigger6_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
-	/* Keeps the fragments of a frame together on the shared bulk endpoint */
+	/* Keeps each session next to its data on the shared bulk endpoint */
 	struct mutex bulk_lock;
 	struct trigger6_output outputs[TRIGGER6_NUM_OUTPUTS];
 };
