@@ -156,7 +156,7 @@ static struct urb *trigger6_alloc_urb(struct trigger6_transfer *transfer,
 	if (!urb)
 		return NULL;
 
-	buf = kmalloc(size, GFP_KERNEL);
+	buf = kzalloc(size, GFP_KERNEL);
 	if (!buf) {
 		usb_free_urb(urb);
 		return NULL;
@@ -212,13 +212,15 @@ void trigger6_send_frame(struct trigger6_output *output,
 	struct trigger6_video_header *hdr;
 	struct iosys_map data_map;
 	struct drm_rect clip;
-	size_t pitch, payload_len, offset, len;
+	unsigned int pitch;
+	size_t payload_len, offset, len;
 	int lines_per_urb, y, idx;
 
 	if (!drm_dev_enter(&trigger6->drm, &idx))
 		return;
 
-	pitch = (size_t)drm_rect_width(rect) * 3;
+	/* Rows need to be 16-byte aligned */
+	pitch = ALIGN(drm_rect_width(rect) * 3, 16);
 	payload_len = sizeof(*hdr) + pitch * drm_rect_height(rect);
 	lines_per_urb = TRIGGER6_URB_BUF_SIZE / pitch;
 
@@ -264,7 +266,7 @@ void trigger6_send_frame(struct trigger6_output *output,
 
 		iosys_map_set_vaddr(&data_map,
 				    transfer->data_urb->transfer_buffer);
-		drm_fb_xrgb8888_to_rgb888(&data_map, NULL, src, fb, &clip,
+		drm_fb_xrgb8888_to_rgb888(&data_map, &pitch, src, fb, &clip,
 					  fmtcnv_state);
 
 		if (trigger6_submit_transfer(transfer, len))
