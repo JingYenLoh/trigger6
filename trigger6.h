@@ -5,6 +5,7 @@
 
 #include <linux/completion.h>
 #include <linux/mm_types.h>
+#include <linux/mutex.h>
 #include <linux/sizes.h>
 #include <linux/usb.h>
 
@@ -30,6 +31,9 @@ struct iosys_map;
 #define TRIGGER6_ENDPOINT_BULK_IN	0x1
 #define TRIGGER6_ENDPOINT_BULK_OUT	0x2
 #define TRIGGER6_ENDPOINT_INTERRUPT_IN	0x3
+
+#define TRIGGER6_NUM_OUTPUTS	2
+#define TRIGGER6_MAX_MODES	36
 
 #define TRIGGER6_NUM_URBS	8
 #define TRIGGER6_URB_BUF_SIZE	SZ_128K
@@ -86,45 +90,55 @@ struct trigger6_video_header {
 } __packed;
 
 struct trigger6_transfer {
-	struct trigger6_device *trigger6;
+	struct trigger6_output *output;
 	struct urb *urb;
 	struct completion done;
 };
 
-struct trigger6_device {
-	struct drm_device drm;
-	struct usb_interface *intf;
+struct trigger6_output {
+	struct trigger6_device *trigger6;
+	int index;
 
 	struct drm_plane plane;
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	struct drm_connector connector;
 
-	struct trigger6_mode modes[30];
+	struct trigger6_mode modes[TRIGGER6_MAX_MODES];
 
 	int next_transfer;
 	struct trigger6_transfer transfers[TRIGGER6_NUM_URBS];
 };
 
+struct trigger6_device {
+	struct drm_device drm;
+	struct usb_interface *intf;
+	/* Keeps the fragments of a frame together on the shared bulk endpoint */
+	struct mutex bulk_lock;
+	struct trigger6_output outputs[TRIGGER6_NUM_OUTPUTS];
+};
+
 #define to_trigger6(x) container_of(x, struct trigger6_device, drm)
 
-int trigger6_connector_init(struct trigger6_device *trigger6);
-int trigger6_set_resolution(struct trigger6_device *trigger6,
-			    struct trigger6_mode *mode);
+struct trigger6_device *trigger6_drm_create(struct usb_interface *intf);
+void trigger6_drm_destroy(struct trigger6_device *trigger6);
 
-int trigger6_read_modes(struct trigger6_device *trigger6, int output_index,
+int trigger6_read_modes(struct trigger6_device *trigger6, int output,
 			int byte_offset, void *data, int length);
 int trigger6_read_connector_status(struct trigger6_device *trigger6,
-				   int output_index);
+				   int output);
+int trigger6_read_edid(struct trigger6_device *trigger6, int output,
+		       int byte_offset, void *data, int length);
+int trigger6_set_resolution(struct trigger6_device *trigger6, int output,
+			    const struct trigger6_mode *mode);
+int trigger6_enable_output(struct trigger6_device *trigger6, int output);
+int trigger6_disable_output(struct trigger6_device *trigger6, int output);
 
-int trigger6_alloc_urbs(struct trigger6_device *trigger6);
-void trigger6_free_urbs(struct trigger6_device *trigger6);
-void trigger6_stop_io(struct trigger6_device *trigger6);
+int trigger6_alloc_urbs(struct trigger6_output *output);
+void trigger6_free_urbs(struct trigger6_output *output);
+void trigger6_stop_io(struct trigger6_output *output);
 
-int trigger6_enable_output(struct trigger6_device *trigger6);
-int trigger6_disable_output(struct trigger6_device *trigger6);
-
-void trigger6_send_frame(struct trigger6_device *trigger6,
+void trigger6_send_frame(struct trigger6_output *output,
 			 struct drm_framebuffer *fb, const struct iosys_map *src,
 			 const struct drm_rect *rect,
 			 struct drm_format_conv_state *fmtcnv_state);
