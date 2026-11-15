@@ -3,7 +3,9 @@
 #ifndef TRIGGER6_H
 #define TRIGGER6_H
 
+#include <linux/completion.h>
 #include <linux/mm_types.h>
+#include <linux/sizes.h>
 #include <linux/usb.h>
 
 #include <drm/drm_device.h>
@@ -11,6 +13,10 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_print.h>
+
+struct drm_format_conv_state;
+struct drm_rect;
+struct iosys_map;
 
 #define DRIVER_NAME "trigger6"
 #define DRIVER_DESC "Magic Control Technology Trigger 6"
@@ -23,7 +29,9 @@
 #define TRIGGER6_ENDPOINT_BULK_OUT	0x2
 #define TRIGGER6_ENDPOINT_INTERRUPT_IN	0x3
 
-#define TRIGGER6_MAX_TRANSFER_LENGTH 0x19000
+#define TRIGGER6_NUM_URBS	8
+#define TRIGGER6_URB_BUF_SIZE	SZ_128K
+#define TRIGGER6_BULK_TIMEOUT_MS	2000
 
 struct trigger6_mode {
 	u32 pixel_clock_khz;
@@ -75,10 +83,10 @@ struct trigger6_video_header {
 	__le32 unk13;
 } __packed;
 
-struct trigger6_urb {
-	struct list_head entry;
-	struct trigger6_device *parent;
+struct trigger6_transfer {
+	struct trigger6_device *trigger6;
 	struct urb *urb;
+	struct completion done;
 };
 
 struct trigger6_device {
@@ -92,15 +100,8 @@ struct trigger6_device {
 
 	struct trigger6_mode modes[30];
 
-	u8 *frame_data;
-	size_t frame_data_size;
-
-	int num_urbs;
-	atomic_t urbs_in_flight;
-	struct list_head urb_available_list;
-	spinlock_t urb_available_list_lock;
-	struct semaphore urb_available_list_sem;
-	struct completion transfer_done;
+	int next_transfer;
+	struct trigger6_transfer transfers[TRIGGER6_NUM_URBS];
 };
 
 #define to_trigger6(x) container_of(x, struct trigger6_device, drm)
@@ -114,16 +115,17 @@ int trigger6_read_modes(struct trigger6_device *trigger6, int output_index,
 int trigger6_read_connector_status(struct trigger6_device *trigger6,
 				   int output_index);
 
-int trigger6_init_urb(struct trigger6_device *trigger6, size_t total_size);
-struct urb *trigger6_get_urb(struct trigger6_device *trigger6);
-void trigger6_urb_completion(struct urb *urb);
-void trigger6_free_urb(struct trigger6_device *trigger6);
+int trigger6_alloc_urbs(struct trigger6_device *trigger6);
+void trigger6_free_urbs(struct trigger6_device *trigger6);
+void trigger6_stop_io(struct trigger6_device *trigger6);
 
 int trigger6_enable_output(struct trigger6_device *trigger6);
 int trigger6_disable_output(struct trigger6_device *trigger6);
 
-void trigger6_send_frame(struct trigger6_device *trigger6, void *buf,
-			 size_t buf_size);
+void trigger6_send_frame(struct trigger6_device *trigger6,
+			 struct drm_framebuffer *fb, const struct iosys_map *src,
+			 const struct drm_rect *rect,
+			 struct drm_format_conv_state *fmtcnv_state);
 enum drm_mode_status
 trigger6_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode);
