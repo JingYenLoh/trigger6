@@ -4,9 +4,11 @@
 #define TRIGGER6_H
 
 #include <linux/completion.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 #include <linux/mm_types.h>
-#include <linux/mutex.h>
 #include <linux/sizes.h>
+#include <linux/spinlock.h>
 #include <linux/usb.h>
 
 #include <drm/drm_device.h>
@@ -17,9 +19,14 @@
 #include <drm/drm_plane.h>
 #include <drm/drm_print.h>
 
+#include <sound/asound.h>
+
 struct drm_format_conv_state;
 struct drm_rect;
 struct iosys_map;
+struct snd_card;
+struct snd_pcm;
+struct snd_pcm_substream;
 
 #define DRIVER_NAME "trigger6"
 #define DRIVER_DESC "Magic Control Technology Trigger 6"
@@ -58,6 +65,9 @@ struct trigger6_mode {
 	u16 unk11;
 } __packed;
 
+#define TRIGGER6_SESSION_VIDEO	0
+#define TRIGGER6_SESSION_AUDIO	3
+
 struct trigger6_session {
 	__le32 session_number;
 	__le32 payload_length;
@@ -89,12 +99,24 @@ struct trigger6_video_header {
 	__le32 unk13;
 } __packed;
 
+struct trigger6_audio_config {
+	__le32 enable;
+	__le32 unk1;
+	__le32 unk2;	// 0x2580, same as the initial silence in bytes
+	__le32 unk3;	// 0x20000
+} __packed;
+
 struct trigger6_transfer {
-	struct trigger6_output *output;
+	struct trigger6_device *trigger6;
 	struct urb *session_urb;
 	struct urb *data_urb;
 	/* Completed once by each of the two URBs */
 	struct completion done;
+};
+
+struct trigger6_pool {
+	int next;
+	struct trigger6_transfer transfers[TRIGGER6_NUM_TRANSFERS];
 };
 
 struct trigger6_output {
@@ -108,16 +130,33 @@ struct trigger6_output {
 
 	struct trigger6_mode modes[TRIGGER6_MAX_MODES];
 
-	int next_transfer;
-	struct trigger6_transfer transfers[TRIGGER6_NUM_TRANSFERS];
+	struct trigger6_pool pool;
+};
+
+struct trigger6_audio {
+	struct snd_card *card;
+	struct snd_pcm *pcm;
+	struct snd_pcm_substream *substream;
+	bool enabled;
+
+	struct hrtimer timer;
+	ktime_t period;
+	struct trigger6_pool pool;
+
+	/* Protected by the PCM stream lock */
+	bool running;
+	ktime_t start;
+	snd_pcm_uframes_t sent_ptr;
+	u64 frames_sent;
 };
 
 struct trigger6_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
 	/* Keeps each session next to its data on the shared bulk endpoint */
-	struct mutex bulk_lock;
+	spinlock_t bulk_lock;
 	struct trigger6_output outputs[TRIGGER6_NUM_OUTPUTS];
+	struct trigger6_audio audio;
 };
 
 #define to_trigger6(x) container_of(x, struct trigger6_device, drm)
@@ -135,14 +174,29 @@ int trigger6_set_resolution(struct trigger6_device *trigger6, int output,
 			    const struct trigger6_mode *mode);
 int trigger6_enable_output(struct trigger6_device *trigger6, int output);
 int trigger6_disable_output(struct trigger6_device *trigger6, int output);
+int trigger6_set_audio(struct trigger6_device *trigger6, bool enable);
 
-int trigger6_alloc_urbs(struct trigger6_output *output);
-void trigger6_free_urbs(struct trigger6_output *output);
-void trigger6_stop_io(struct trigger6_output *output);
+int trigger6_alloc_pool(struct trigger6_device *trigger6,
+			struct trigger6_pool *pool, size_t size);
+void trigger6_free_pool(struct trigger6_pool *pool);
+void trigger6_kill_pool(struct trigger6_pool *pool);
+struct trigger6_transfer *
+trigger6_get_next_transfer(struct trigger6_pool *pool);
+struct trigger6_transfer *
+trigger6_try_get_next_transfer(struct trigger6_pool *pool);
+void trigger6_fill_session(struct trigger6_transfer *transfer, u32 number,
+			   u32 dest, size_t payload_len, size_t offset,
+			   size_t len);
+int trigger6_submit_transfer(struct trigger6_transfer *transfer, size_t len);
 
 void trigger6_send_frame(struct trigger6_output *output,
 			 struct drm_framebuffer *fb, const struct iosys_map *src,
 			 const struct drm_rect *rect,
 			 struct drm_format_conv_state *fmtcnv_state);
+
+int trigger6_audio_init(struct trigger6_device *trigger6);
+void trigger6_audio_disconnect(struct trigger6_device *trigger6);
+void trigger6_audio_suspend(struct trigger6_device *trigger6);
+void trigger6_audio_resume(struct trigger6_device *trigger6);
 
 #endif

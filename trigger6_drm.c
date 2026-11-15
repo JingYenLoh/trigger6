@@ -332,7 +332,8 @@ static int trigger6_output_init(struct trigger6_device *trigger6, int index)
 	if (ret)
 		return ret;
 
-	ret = trigger6_alloc_urbs(output);
+	ret = trigger6_alloc_pool(trigger6, &output->pool,
+				  TRIGGER6_URB_BUF_SIZE);
 	if (ret)
 		return ret;
 
@@ -380,7 +381,7 @@ static void trigger6_free_all_urbs(struct trigger6_device *trigger6)
 	int i;
 
 	for (i = 0; i < TRIGGER6_NUM_OUTPUTS; i++)
-		trigger6_free_urbs(&trigger6->outputs[i]);
+		trigger6_free_pool(&trigger6->outputs[i].pool);
 }
 
 struct trigger6_device *trigger6_drm_create(struct usb_interface *interface)
@@ -396,7 +397,7 @@ struct trigger6_device *trigger6_drm_create(struct usb_interface *interface)
 		return trigger6;
 
 	trigger6->intf = interface;
-	mutex_init(&trigger6->bulk_lock);
+	spin_lock_init(&trigger6->bulk_lock);
 	dev = &trigger6->drm;
 
 	dma_dev = usb_intf_get_dma_device(interface);
@@ -453,6 +454,6 @@ void trigger6_drm_destroy(struct trigger6_device *trigger6)
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
 	for (i = 0; i < TRIGGER6_NUM_OUTPUTS; i++)
-		trigger6_stop_io(&trigger6->outputs[i]);
+		trigger6_kill_pool(&trigger6->outputs[i].pool);
 	trigger6_free_all_urbs(trigger6);
 }

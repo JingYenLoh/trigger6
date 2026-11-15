@@ -17,7 +17,9 @@ static int trigger6_usb_suspend(struct usb_interface *interface,
 		return ret;
 
 	for (i = 0; i < TRIGGER6_NUM_OUTPUTS; i++)
-		trigger6_stop_io(&trigger6->outputs[i]);
+		trigger6_kill_pool(&trigger6->outputs[i].pool);
+
+	trigger6_audio_suspend(trigger6);
 
 	return 0;
 }
@@ -26,6 +28,8 @@ static int trigger6_usb_resume(struct usb_interface *interface)
 {
 	struct trigger6_device *trigger6 = usb_get_intfdata(interface);
 
+	trigger6_audio_resume(trigger6);
+
 	return drm_mode_config_helper_resume(&trigger6->drm);
 }
 
@@ -33,10 +37,17 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 			      const struct usb_device_id *id)
 {
 	struct trigger6_device *trigger6;
+	int ret;
 
 	trigger6 = trigger6_drm_create(interface);
 	if (IS_ERR(trigger6))
 		return PTR_ERR(trigger6);
+
+	ret = trigger6_audio_init(trigger6);
+	if (ret) {
+		trigger6_drm_destroy(trigger6);
+		return ret;
+	}
 
 	usb_set_intfdata(interface, trigger6);
 
@@ -47,6 +58,7 @@ static void trigger6_usb_disconnect(struct usb_interface *interface)
 {
 	struct trigger6_device *trigger6 = usb_get_intfdata(interface);
 
+	trigger6_audio_disconnect(trigger6);
 	trigger6_drm_destroy(trigger6);
 }
 
@@ -63,6 +75,7 @@ static struct usb_driver trigger6_driver = {
 	.suspend = trigger6_usb_suspend,
 	.resume = trigger6_usb_resume,
 	.id_table = id_table,
+	.soft_unbind = 1,
 };
 
 module_usb_driver(trigger6_driver);

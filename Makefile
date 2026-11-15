@@ -1,4 +1,5 @@
 trigger6-y := \
+	trigger6_audio.o \
 	trigger6_commands.o \
 	trigger6_drm.o \
 	trigger6_drv.o \

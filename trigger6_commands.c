@@ -68,3 +68,17 @@ int trigger6_disable_output(struct trigger6_device *trigger6, int output)
 			       USB_TYPE_VENDOR, output, 0x0000, NULL, 0,
 			       USB_CTRL_SET_TIMEOUT);
 }
+
+int trigger6_set_audio(struct trigger6_device *trigger6, bool enable)
+{
+	struct usb_device *usb_dev = interface_to_usbdev(trigger6->intf);
+	struct trigger6_audio_config config = {
+		.enable = cpu_to_le32(enable),
+		.unk2 = cpu_to_le32(0x2580),
+		.unk3 = cpu_to_le32(0x20000),
+	};
+
+	return usb_control_msg_send(usb_dev, 0, 0x24, USB_TYPE_VENDOR, 0, 0,
+				    &config, sizeof(config),
+				    USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+}
