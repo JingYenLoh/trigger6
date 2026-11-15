@@ -22,6 +22,7 @@
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
+#include <drm/drm_rect.h>
 
 #include "trigger6.h"
 
@@ -149,10 +150,7 @@ static void trigger6_plane_atomic_update(struct drm_plane *plane,
 		return;
 
 	/* hack to force full screen updates for now */
-	current_rect.x1 = 0;
-	current_rect.y1 = 0;
-	current_rect.x2 = state->fb->width;
-	current_rect.y2 = state->fb->height;
+	drm_rect_fp_to_int(&current_rect, &state->src);
 
 	if (drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE) < 0)
 		return;
